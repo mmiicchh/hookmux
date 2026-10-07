@@ -1,0 +1,78 @@
+# Rules shared by every test. Each exec echoes a marker, so a test is one
+# invocation and one expected line. Rules are tried top to bottom; every run
+# must end in a rule, so the list ends with a catch-all.
+rules:
+  # --- routing on the payload ---------------------------------------------
+  - name: payload-cwd-x                 # a field of the JSON on stdin; .? because it may be absent
+    when: in_json().?cwd.orValue("") == "/x"
+    exec: echo PAYLOAD_CWD_X
+
+  - name: go-run-guard                  # optional chaining through nested fields
+    when: in_json().?tool_input.?command.orValue("").startsWith("go run")
+    exec: echo GO_RUN_GUARD
+
+  - name: raw-text                      # non-JSON stdin: in_json() is {} above, in_raw() sees the text
+    when: in_raw().startsWith("plain")
+    exec: echo RAW_TEXT
+
+  # --- routing on the surroundings ----------------------------------------
+  - name: profile-v2                    # the agent's environment
+    when: env("HOOKMUX_TEST_PROFILE") == "v2"
+    exec: echo PROFILE_V2
+
+  - name: under-fakeclaude              # argv[0] of a parent process
+    when: '"fakeclaude" in ancestors()'
+    exec: echo UNDER_FAKECLAUDE
+
+  # --- shaping the target's arguments -------------------------------------
+  - name: statusline                    # exec_args: keep the hook's own arguments
+    when: cmd0 == "statusline"
+    exec: echo STATUSLINE
+    exec_args: cmd1n
+
+  - name: swap-binary                   # exec_args: keep some, insert one, keep the rest
+    when: cmd0 == "/old/tool"
+    exec: echo NEW_TOOL
+    exec_args: cmd.slice(1, 2) + ["--foo"] + cmd.slice(2, cmd.size())
+
+  - name: mixed-args                    # exec_args: literals, env and payload mixed; quoted because it starts with [
+    when: cmd0 == "mixed"
+    exec: echo MIXED
+    exec_args: '["--user", env("HOOKMUX_TEST_USER"), cmd0, in_json().?cwd.orValue(".")]'
+
+  - name: filtered-args                 # exec_args: drop one argument
+    when: cmd0 == "filtered"
+    exec: echo FILTERED
+    exec_args: cmd1n.filter(a, a != "--verbose")
+
+  - name: quotes                        # exec is split like a shell line; nothing is substituted
+    when: cmd0 == "quote"
+    exec: echo 'literal $1' "two words"
+
+  # --- sampling -----------------------------------------------------------
+  - name: quiet                         # sample_rate 0: successful runs are not recorded …
+    when: cmd0 == "quiet"
+    exec: echo QUIET
+    sample_rate: 0
+
+  - name: quiet-fail                    # … but a failing run always is
+    when: cmd0 == "quiet-fail"
+    exec: sh -c "exit 4"
+    sample_rate: 0
+
+  # --- failure behaviour --------------------------------------------------
+  - name: eval-error                    # cmd[9] on a short cmd is an error → loud exit 2, not false
+    when: cmd0 == "evalerr" && cmd[9] == "never"
+    exec: echo NEVER
+
+  - name: exit-code                     # the target's exit code and stderr come back unchanged
+    when: cmd0 == "fail"
+    exec: sh -c "echo oops >&2; exit 3"
+
+  # --- catch-alls ---------------------------------------------------------
+  - name: passthrough                   # runs the wrapped command as given, when there is one
+    when: cmd.size() > 0
+    exec_args: cmd
+
+  - name: other-events                  # no when: matches everything left; `true` does nothing and exits 0
+    exec: true

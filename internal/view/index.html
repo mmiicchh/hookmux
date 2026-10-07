@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hookmux</title>
+<style>
+  :root { --bg:#fff; --fg:#1b1b1b; --mut:#6b7280; --line:#e5e7eb; --sel:#eef2ff; --ok:#15803d; --bad:#b91c1c; --code:#f6f7f9; --key:#7c3aed; --str:#0f766e; --num:#b45309; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111317; --fg:#e6e6e6; --mut:#9ca3af; --line:#2a2e36; --sel:#1f2a44; --ok:#4ade80; --bad:#f87171; --code:#181b21; --key:#c4b5fd; --str:#5eead4; --num:#fcd34d; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { display:flex; gap:16px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header b { font-size:15px; } header span { color:var(--mut); }
+  input { background:var(--code); color:var(--fg); border:1px solid var(--line); padding:4px 8px; border-radius:4px; width:300px; }
+  button { background:var(--code); color:var(--fg); border:1px solid var(--line); padding:3px 8px; border-radius:4px; cursor:pointer; font:inherit; }
+  button.on { border-color:var(--fg); }
+  main { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); height: calc(100vh - 45px); }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; height:auto; } }
+  section { overflow:auto; padding:0 16px 16px; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:4px 12px 4px 0; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--mut); font-weight:normal; position:sticky; top:0; background:var(--bg); }
+  td.num, th.num { text-align:right; }
+  tr { cursor:pointer; } tr.sel { background:var(--sel); }
+  td.cmd { max-width:0; width:45%; overflow:hidden; text-overflow:ellipsis; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .mut { color:var(--mut); }
+  pre { background:var(--code); border:1px solid var(--line); border-radius:4px; padding:8px; white-space:pre-wrap; word-break:break-all; max-height:40vh; overflow:auto; margin:4px 0 12px; }
+  h3 { margin:14px 0 4px; font-size:13px; color:var(--mut); font-weight:normal; display:flex; align-items:center; }
+  h3 .right { margin-left:auto; display:flex; gap:6px; align-items:center; }
+  dl { display:grid; grid-template-columns: minmax(90px,max-content) 1fr; gap:2px 8px; margin:0; } dt { color:var(--mut); } dd { margin:0; word-break:break-all; }
+  .k { color:var(--key); } .s { color:var(--str); } .n { color:var(--num); }
+</style>
+</head>
+<body>
+<header>
+  <b>hookmux</b>
+  <span id="count"></span>
+  <button id="more" title="fetch more rows">more</button>
+  <input id="q" placeholder="filter: rule or cmd · stdin:text · exit:2 · -exclude"
+         title="bare words match rule and cmd; field:value for rule, cmd, exit, error, stdin, stdout, stderr, cwd, exec; -word excludes">
+  <span id="live" class="mut">live</span>
+</header>
+<main>
+<section><table><thead><tr><th>time</th><th>rule</th><th class="num" title="exit code; ⚠ = hookmux itself failed (hover for the reason)">exit</th><th class="num">ms</th><th>cmd</th></tr></thead><tbody id="rows"></tbody></table></section>
+<section id="detail"><p class="mut">select an invocation</p></section>
+</main>
+<script>
+const MAX_LIMIT = 2700;
+let recs = [], selId = null, limit = 300, lastBody = '', shownDetail = '';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const line = a => (a || []).join(' ');
+let pretty = false;
+try { pretty = localStorage.getItem('hookmux.pretty') === '1'; } catch (e) {}
+
+async function load() {
+  let body;
+  try {
+    body = await (await fetch('/api/hist?limit=' + limit)).text();
+    $('live').textContent = 'live · ' + new Date().toLocaleTimeString();
+  } catch (e) { $('live').textContent = 'disconnected'; return; }
+  if (body === lastBody) return;
+  lastBody = body;
+  recs = JSON.parse(body) || [];
+  for (const r of recs) r.time = new Date(r.ts).toLocaleTimeString();
+  render();
+}
+
+// Filter: bare words match rule and cmd; field:value reaches one field; -word excludes.
+const FIELDS = { rule: r => r.matched, cmd: r => line(r.cmd), exit: r => String(r.exit), error: r => r.error,
+                 stdin: r => r.stdin, stdout: r => r.stdout, stderr: r => r.stderr, cwd: r => r.cwd, exec: r => line(r.exec) };
+function compile(q) {
+  return q.toLowerCase().split(/\s+/).map(tok => {
+    const neg = tok.startsWith('-'); if (neg) tok = tok.slice(1);
+    const i = tok.indexOf(':'), field = i > 0 ? tok.slice(0, i) : '';
+    const get = Object.hasOwn(FIELDS, field) ? FIELDS[field] : null;
+    return { neg, field: get ? field : '', get, value: get ? tok.slice(i + 1) : tok };
+  }).filter(t => t.value);
+}
+function matches(r, terms) {
+  return terms.every(t => {
+    const hay = (t.get ? String(t.get(r) ?? '') : r.matched + ' ' + line(r.cmd)).toLowerCase();
+    const hit = t.field === 'exit' ? hay === t.value : hay.includes(t.value);
+    return hit !== t.neg;
+  });
+}
+function render() {
+  const terms = compile($('q').value);
+  const shown = recs.filter(r => matches(r, terms));
+  $('count').textContent = (terms.length ? shown.length + ' match in ' : '') + 'latest ' + recs.length;
+  $('more').style.display = recs.length < limit || limit >= MAX_LIMIT ? 'none' : '';
+  $('rows').innerHTML = shown.map(r => `<tr data-id="${r.id}" class="${r.id === selId ? 'sel' : ''}">
+    <td>${r.time}</td>
+    <td>${esc(r.matched) || '<span class="mut">—</span>'}</td>
+    <td class="num ${r.exit || r.error ? 'bad' : 'ok'}" title="${esc(r.error)}">${r.exit}${r.error ? ' ⚠' : ''}</td>
+    <td class="num">${r.duration_ms}</td>
+    <td class="cmd" title="${esc(line(r.cmd))}">${esc(line(r.cmd)) || '<span class="mut">(bare)</span>'}</td></tr>`).join('');
+  detail(recs.find(r => r.id === selId));
+}
+function asJSON(s) { try { const v = JSON.parse(s); return v && typeof v === 'object' ? v : null; } catch (e) { return null; } }
+function colour(json) {
+  return esc(json).replace(/(&quot;(?:[^&]|&(?!quot;))*&quot;)(\s*:)?|\b(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?|true|false|null)\b/g,
+    (m, str, colon, lit) => str ? (colon ? `<span class="k">${str}</span>${colon}` : `<span class="s">${str}</span>`) : `<span class="n">${lit}</span>`);
+}
+function block(name, body, n) {
+  const j = pretty ? asJSON(body) : null;
+  const note = body.length < n ? ` <span class="mut">(showing ${body.length} of ${n} bytes)</span>` : '';
+  return `<h3>${name}${note}</h3><pre>${j ? colour(JSON.stringify(j, null, 2)) : (esc(body) || '<span class="mut">(empty)</span>')}</pre>`;
+}
+function detail(r) {
+  const key = r ? r.id + '|' + pretty + '|' + r.duration_ms : '';
+  if (key === shownDetail) return;     // unchanged: keep scroll position and selection
+  shownDetail = key;
+  if (!r) { $('detail').innerHTML = '<p class="mut">select an invocation</p>'; return; }
+  $('detail').innerHTML = `
+    <h3>invocation <span class="right">payload
+      <button class="${pretty ? '' : 'on'}" onclick="setPretty(false)">raw</button>
+      <button class="${pretty ? 'on' : ''}" onclick="setPretty(true)">pretty</button></span></h3><dl>
+      <dt>id</dt><dd>${r.id}</dd>
+      <dt>hookmux</dt><dd>${esc(r.hookmux_version) || '<span class="mut">—</span>'}</dd>
+      <dt>cwd</dt><dd>${esc(r.cwd)}</dd>
+      <dt>argv</dt><dd>${esc(line(r.argv))}</dd>
+      ${r.ancestors ? `<dt>ancestors</dt><dd>${esc(r.ancestors.join(' ← '))}</dd>` : ''}
+      <dt>config</dt><dd>${esc(r.config)}${r.config_err ? ` <span class="bad">${esc(r.config_err)}</span>` : ''}</dd>
+      <dt>matched</dt><dd>${esc(r.matched) || '—'}</dd>
+      <dt>exec</dt><dd>${esc(line(r.exec)) || '—'}</dd>
+      <dt>exit</dt><dd class="${r.exit || r.error ? 'bad' : 'ok'}">${r.exit} (${r.duration_ms}ms)${r.error ? ` <span class="bad">${esc(r.error)}</span>` : ''}</dd>
+    </dl>
+    <h3>rules</h3><dl>${(r.rules||[]).map(x => `<dt>${esc(x.name)}</dt><dd class="${x.err ? 'bad' : x.match ? 'ok' : 'mut'}">${x.err ? 'error: ' + esc(x.err) : x.match ? 'MATCH' : 'false'}</dd>`).join('') || '<dd class="mut">none</dd>'}</dl>
+    ${block('stdin', r.stdin, r.stdin_len)}${block('stdout', r.stdout, r.stdout_len)}${block('stderr', r.stderr, r.stderr_len)}`;
+}
+$('rows').addEventListener('click', e => { const tr = e.target.closest('tr'); if (tr) { selId = tr.dataset.id; render(); } });
+$('q').addEventListener('input', render);
+$('more').addEventListener('click', () => { limit = Math.min(limit * 3, MAX_LIMIT); load(); });
+function setPretty(v) { pretty = v; try { localStorage.setItem('hookmux.pretty', v ? '1' : '0'); } catch (e) {} render(); }
+load(); setInterval(load, 2000);
+</script>
+</body>
+</html>
