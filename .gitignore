@@ -1,0 +1,5 @@
+DNC*
+bin/
+.task/
+__pycache__/
+.pytest_cache/
