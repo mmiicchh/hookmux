@@ -1,0 +1,3 @@
+# A config with no rules. hookmux was wired in but can never act, so every
+# run is an error (exit 2) rather than a silent no-op.
+rules: []

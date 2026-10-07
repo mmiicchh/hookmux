@@ -1,0 +1,47 @@
+version: '3'
+
+vars:
+  BIN: bin/hookmux
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: build the binary
+    cmds:
+      - go build -o {{.BIN}} ./cmd/hookmux   # go caches; Task must not skip it, the version tracks git state
+
+  test:
+    desc: go unit tests
+    cmds:
+      - go test ./...
+
+  e2e:
+    desc: black-box tests against the built binary
+    deps: [build]
+    cmds:
+      - uv run --with pytest pytest tests -q {{.CLI_ARGS}}
+    env:
+      HOOKMUX_BIN: '{{.PWD}}/{{.BIN}}'
+
+  check:
+    desc: gofmt + vet
+    cmds:
+      - test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - go vet ./...
+
+  install:
+    desc: copy a tested build to ~/.local/bin (never symlink the dev build)
+    deps: [check, test, e2e]
+    cmds:
+      - install -m 755 {{.BIN}} {{.HOME}}/.local/bin/hookmux
+      - '{{.HOME}}/.local/bin/hookmux --version'
+
+  view:
+    desc: open the history UI
+    deps: [build]
+    cmds:
+      - '{{.BIN}} view'
